@@ -3,7 +3,6 @@ package com.mirror.receiver
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Bundle
 import android.view.View
@@ -38,7 +37,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Tela cheia imersiva
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
@@ -51,7 +49,7 @@ class MainActivity : AppCompatActivity() {
         val tvIp      = findViewById<TextView>(R.id.tvIp)
 
         val localIp = getLocalIp()
-        tvIp.text    = "📺 IP: $localIp"
+        tvIp.text     = "📺 IP: $localIp"
         tvStatus.text = "⏳ Aguardando celular..."
 
         startUdpBroadcast(localIp)
@@ -80,12 +78,10 @@ class MainActivity : AppCompatActivity() {
         broadcastJob = CoroutineScope(Dispatchers.IO).launch {
             val socket = DatagramSocket()
             socket.broadcast = true
-            val msg = "$BROADCAST_MSG:$localIp".toByteArray()
+            val msg  = "$BROADCAST_MSG:$localIp".toByteArray()
             val addr = InetAddress.getByName("255.255.255.255")
             while (isActive) {
-                try {
-                    socket.send(DatagramPacket(msg, msg.size, addr, UDP_PORT))
-                } catch (_: Exception) {}
+                try { socket.send(DatagramPacket(msg, msg.size, addr, UDP_PORT)) } catch (_: Exception) {}
                 delay(2000)
             }
             socket.close()
@@ -94,27 +90,43 @@ class MainActivity : AppCompatActivity() {
 
     private fun startVideoServer(imageView: ImageView, tvStatus: TextView) {
         videoJob = CoroutineScope(Dispatchers.IO).launch {
-            videoServer = ServerSocket(TCP_VIDEO_PORT)
+            try {
+                videoServer = ServerSocket(TCP_VIDEO_PORT)
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) { tvStatus.text = "Erro porta vídeo: ${e.message}" }
+                return@launch
+            }
+
             while (isActive) {
                 withContext(Dispatchers.Main) { tvStatus.text = "⏳ Aguardando celular..." }
-                val client = videoServer!!.accept()
+
+                val client = try { videoServer!!.accept() } catch (e: Exception) { break }
+                val clientIp = client.inetAddress.hostAddress
+
                 withContext(Dispatchers.Main) {
-                    tvStatus.text = "✅ Conectado: ${client.inetAddress.hostAddress}"
+                    tvStatus.text = "✅ Conectado: $clientIp"
                 }
+
                 val din = DataInputStream(client.getInputStream())
                 try {
                     while (isActive) {
-                        val type = din.readByte()
+                        // Ler tipo
+                        val type = try { din.readByte() } catch (e: Exception) { throw e }
+                        // Ler tamanho
                         val size = din.readInt()
                         if (size <= 0 || size > 20_000_000) continue
+
+                        // Ler bytes completos
                         val bytes = ByteArray(size)
                         var read = 0
                         while (read < size) {
                             val n = din.read(bytes, read, size - read)
-                            if (n < 0) throw Exception("EOF")
+                            if (n < 0) throw Exception("Conexão encerrada")
                             read += n
                         }
+
                         if (type == TYPE_VIDEO) {
+                            // Decodificar sem reutilização de bitmap (evita crash)
                             val bmp = BitmapFactory.decodeByteArray(bytes, 0, size)
                             if (bmp != null) {
                                 withContext(Dispatchers.Main) {
@@ -124,9 +136,11 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    withContext(Dispatchers.Main) { tvStatus.text = "❌ Desconectado. Aguardando..." }
+                    withContext(Dispatchers.Main) {
+                        tvStatus.text = "❌ Desconectado. Aguardando..."
+                    }
                 } finally {
-                    client.close()
+                    try { client.close() } catch (_: Exception) {}
                 }
             }
         }
@@ -134,15 +148,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun startAudioServer() {
         audioJob = CoroutineScope(Dispatchers.IO).launch {
-            audioServer = ServerSocket(TCP_AUDIO_PORT)
+            try {
+                audioServer = ServerSocket(TCP_AUDIO_PORT)
+            } catch (e: Exception) {
+                return@launch
+            }
+
             while (isActive) {
-                val client = audioServer!!.accept()
+                val client = try { audioServer!!.accept() } catch (e: Exception) { break }
                 val din = DataInputStream(client.getInputStream())
 
-                val sampleRate = 44100
+                val sampleRate    = 44100
                 val channelConfig = AudioFormat.CHANNEL_OUT_STEREO
-                val encoding = AudioFormat.ENCODING_PCM_16BIT
-                val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding)
+                val encoding      = AudioFormat.ENCODING_PCM_16BIT
+                val minBuf        = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding)
 
                 val track = AudioTrack.Builder()
                     .setAudioAttributes(
@@ -181,9 +200,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (_: Exception) {
                 } finally {
-                    track.stop()
-                    track.release()
-                    client.close()
+                    try { track.stop(); track.release() } catch (_: Exception) {}
+                    try { client.close() } catch (_: Exception) {}
                 }
             }
         }
@@ -193,8 +211,8 @@ class MainActivity : AppCompatActivity() {
         broadcastJob?.cancel()
         videoJob?.cancel()
         audioJob?.cancel()
-        videoServer?.close()
-        audioServer?.close()
+        try { videoServer?.close() } catch (_: Exception) {}
+        try { audioServer?.close() } catch (_: Exception) {}
         super.onDestroy()
     }
 }
